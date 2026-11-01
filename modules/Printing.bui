@@ -1,0 +1,898 @@
+' Shared native printing API for Linux and Windows.
+Import PrintingDocumentTypes
+#If TargetLinux Then
+Import PrintingLinuxBackend As PrintBackend
+#ElseIf TargetWindows Then
+Import PrintingWindowsBackend As PrintBackend
+#End If
+
+Public Function PrintingSupported() As Boolean
+    #If TargetMac Then
+        Return True
+    #Else
+        Return False
+    #End If
+End Function
+
+#If TargetMac Then
+    Private Declare Function NativeClass Lib "objc" Alias "objc_getClass" (name As String) As Ptr
+    Private Declare Function Allocate Lib "Foundation" Selector "alloc" (cls As Ptr) As Ptr
+    Private Declare Function InitObject Lib "Foundation" Selector "init" (object As Ptr) As Ptr
+    Private Declare Function NewPool Lib "Foundation" Selector "new" (cls As Ptr) As Ptr
+    Private Declare Sub DrainPool Lib "Foundation" Selector "drain" (pool As Ptr)
+    Private Declare Sub ReleaseObject Lib "CoreFoundation" Alias "CFRelease" (value As Ptr)
+    Private Function NativeText(value As Ptr) As String
+        If value = Nil Then Return ""
+        Return CType(CType(value, CFStringRef), String)
+    End Function
+    Private Declare Function CreateData Lib "CoreFoundation" Alias "CFDataCreate" (allocator As Ptr, data As Ptr, length As Integer) As Ptr
+    Private Declare Function DataLength Lib "CoreFoundation" Alias "CFDataGetLength" (data As Ptr) As Integer
+    Private Declare Function DataBytes Lib "CoreFoundation" Alias "CFDataGetBytePtr" (data As Ptr) As Ptr
+    Private Function CopyData(data As Ptr) As Bytes
+        If data = Nil Then Throw New Exception("The native operation returned no data")
+        Dim outputValue As New Bytes()
+        outputValue.Append(DataBytes(data), DataLength(data))
+        Return outputValue
+    End Function
+    Sequential Structure PrintRectangle
+        X As Double
+        Y As Double
+        Width As Double
+        Height As Double
+    End Structure
+    Private Declare Function IsMain Lib "Foundation" Selector "isMainThread" (cls As Ptr) As UInt8
+    Private Declare Function ViewBounds Lib "AppKit" Selector "bounds" (view As Ptr) As PrintRectangle
+    Private Declare Function ContentView Lib "AppKit" Selector "contentView" (window As Ptr) As Ptr
+    Private Declare Function ViewPDF Lib "AppKit" Selector "dataWithPDFInsideRect:" (view As Ptr, rectangle As PrintRectangle) As Ptr
+    Private Declare Function SharedInfo Lib "AppKit" Selector "sharedPrintInfo" (cls As Ptr) As Ptr
+    Private Declare Function CopyInfo Lib "Foundation" Selector "copy" (info As Ptr) As Ptr
+    Private Declare Function PaperName Lib "AppKit" Selector "paperName" (info As Ptr) As Ptr
+    Private Declare Function Orientation Lib "AppKit" Selector "orientation" (info As Ptr) As Integer
+    Private Declare Function NativePrint Lib "AppKit" Selector "printOperationWithView:printInfo:" (cls As Ptr, view As Ptr, info As Ptr) As Ptr
+    Private Declare Function CurrentOperation Lib "AppKit" Selector "currentOperation" (cls As Ptr) As Ptr
+    Private Declare Sub ShowPanel Lib "AppKit" Selector "setShowsPrintPanel:" (operation As Ptr, enabled As UInt8)
+    Private Declare Function RunPrint Lib "AppKit" Selector "runOperation" (operation As Ptr) As UInt8
+    Private Sub RequireMain()
+        If IsMain(NativeClass("NSThread")) = 0 Then Throw New InvalidArgumentException("Printing requires the main thread")
+    End Sub
+    Private Function NativeView(control As UIControl) As Ptr
+        If control = Nil Then Throw New InvalidArgumentException("A control is required")
+        RequireMain()
+        Dim view As Ptr = control.NativeWidget
+        If control IsA Window Then view = ContentView(view)
+        If view = Nil Then Throw New InvalidArgumentException("Control has no native view")
+        Return view
+    End Function
+#End If
+
+
+Public Class PrintSettingsSnapshot
+    Private Property mPaperName As String = ""
+    Public Property PaperName As String
+        Get
+            Return Me.mPaperName
+        End Get
+    End Property
+    Private Property mOrientation As Integer = 0
+    Public Property Orientation As Integer
+        Get
+            Return Me.mOrientation
+        End Get
+    End Property
+    Public Sub Constructor()
+        #If TargetMac Then
+            RequireMain()
+            Dim pool As Ptr = NewPool(NativeClass("NSAutoreleasePool"))
+            Try
+                Dim info As Ptr = SharedInfo(NativeClass("NSPrintInfo"))
+                Me.mPaperName = NativeText(PaperName(info))
+                Me.mOrientation = Orientation(info)
+            Finally
+                DrainPool(pool)
+            End Try
+        #Else
+            Throw New UnsupportedOperationException("Printing requires macOS")
+        #End If
+    End Sub
+End Class
+
+Public Function ExportControlPDF(control As UIControl) As Bytes
+    #If TargetMac Then
+        Dim view As Ptr = NativeView(control)
+        Dim pool As Ptr = NewPool(NativeClass("NSAutoreleasePool"))
+        Try
+            Dim rectangle As PrintRectangle = ViewBounds(view)
+            If rectangle.Width <= 0.0 Or rectangle.Height <= 0.0 Then Throw New InvalidArgumentException("Control needs nonempty bounds")
+            Return CopyData(ViewPDF(view, rectangle))
+        Finally
+            DrainPool(pool)
+        End Try
+    #Else
+        Throw New UnsupportedOperationException("PDF export requires macOS")
+    #End If
+End Function
+
+' Runs a native print operation only when explicitly called. The panel is shown by default.
+Public Function PrintControl(control As UIControl, showPrintPanel As Boolean = True) As Boolean
+    #If TargetMac Then
+        Dim view As Ptr = NativeView(control)
+        If CurrentOperation(NativeClass("NSPrintOperation")) <> Nil Then Throw New InvalidArgumentException("A print operation is already active")
+        Dim pool As Ptr = NewPool(NativeClass("NSAutoreleasePool"))
+        Dim info As Ptr = CopyInfo(SharedInfo(NativeClass("NSPrintInfo")))
+        Try
+            Dim operation As Ptr = NativePrint(NativeClass("NSPrintOperation"), view, info)
+            If operation = Nil Then Throw New Exception("Print operation could not be created")
+            Dim show As UInt8 = 0
+            If showPrintPanel Then show = 1
+            ShowPanel(operation, show)
+            Return RunPrint(operation) <> 0
+        Finally
+            If info <> Nil Then ReleaseObject(info)
+            DrainPool(pool)
+        End Try
+    #Else
+        Throw New UnsupportedOperationException("Printing requires macOS")
+    #End If
+End Function
+
+' Xojo-compatible setup names. Native geometry is expressed at 72 points/inch.
+#If TargetMac Then
+    Sequential Structure PrintSize
+        Width As Double
+        Height As Double
+    End Structure
+    Private Declare Function SetupPaperSize Lib "AppKit" Selector "paperSize" (info As Ptr) As PrintSize
+    Private Declare Sub SetupSetPaperSize Lib "AppKit" Selector "setPaperSize:" (info As Ptr, size As PrintSize)
+    Private Declare Sub SetupSetOrientation Lib "AppKit" Selector "setOrientation:" (info As Ptr, orientation As Integer)
+    Private Declare Function SetupLeftMargin Lib "AppKit" Selector "leftMargin" (info As Ptr) As Double
+    Private Declare Function SetupRightMargin Lib "AppKit" Selector "rightMargin" (info As Ptr) As Double
+    Private Declare Function SetupTopMargin Lib "AppKit" Selector "topMargin" (info As Ptr) As Double
+    Private Declare Function SetupBottomMargin Lib "AppKit" Selector "bottomMargin" (info As Ptr) As Double
+    Private Declare Sub SetupSetLeftMargin Lib "AppKit" Selector "setLeftMargin:" (info As Ptr, margin As Double)
+    Private Declare Sub SetupSetRightMargin Lib "AppKit" Selector "setRightMargin:" (info As Ptr, margin As Double)
+    Private Declare Sub SetupSetTopMargin Lib "AppKit" Selector "setTopMargin:" (info As Ptr, margin As Double)
+    Private Declare Sub SetupSetBottomMargin Lib "AppKit" Selector "setBottomMargin:" (info As Ptr, margin As Double)
+    Private Declare Function SetupScaling Lib "AppKit" Selector "scalingFactor" (info As Ptr) As Double
+    Private Declare Sub SetupSetScaling Lib "AppKit" Selector "setScalingFactor:" (info As Ptr, scale As Double)
+    Private Declare Function SetupPanel Lib "AppKit" Selector "pageLayout" (cls As Ptr) As Ptr
+    Private Declare Function SetupRunPanel Lib "AppKit" Selector "runModalWithPrintInfo:" (panel As Ptr, info As Ptr) As Integer
+#End If
+
+Public Class PrinterSetup
+    ' Explicit paper-canvas adapter; native margins/scale are not drawing transforms.
+    Public Function ToPrintJobSetup(printerName As String = "", jobName As String = "Buoy document") As PrintJobSetup
+#If TargetMac Then
+        RequireMain()
+        Dim jobSetup As New PrintJobSetup
+        Dim size As PrintSize = SetupPaperSize(Me.mInfo)
+        jobSetup.PageWidth = size.Width
+        jobSetup.PageHeight = size.Height
+        jobSetup.Landscape = Me.Landscape
+        jobSetup.PrinterName = printerName
+        jobSetup.JobName = jobName
+        Return jobSetup
+#Else
+        Throw New UnsupportedOperationException("PrinterSetup requires macOS")
+#End If
+    End Function
+    Private Property mInfo As Ptr
+
+    Public Sub Constructor()
+        #If TargetMac Then
+            RequireMain()
+            Me.mInfo = CopyInfo(SharedInfo(NativeClass("NSPrintInfo")))
+            If Me.mInfo = Nil Then Throw New Exception("Could not copy printer settings")
+        #Else
+            Throw New UnsupportedOperationException("PrinterSetup is not implemented on this platform")
+        #End If
+    End Sub
+
+    Public Sub Destructor()
+        #If TargetMac Then
+            If Me.mInfo <> Nil Then ReleaseObject(Me.mInfo)
+        #End If
+    End Sub
+
+    ' Returns a private copy for native operations; callers never own mInfo.
+    Public Function PrintControl(control As UIControl, showPrintPanel As Boolean = True) As Boolean
+        #If TargetMac Then
+            Dim view As Ptr = NativeView(control)
+            If CurrentOperation(NativeClass("NSPrintOperation")) <> Nil Then Throw New InvalidArgumentException("A print operation is already active")
+            Dim pool As Ptr = NewPool(NativeClass("NSAutoreleasePool"))
+            Dim info As Ptr = CopyInfo(Me.mInfo)
+            Try
+                Dim operation As Ptr = NativePrint(NativeClass("NSPrintOperation"), view, info)
+                If operation = Nil Then Throw New Exception("Print operation could not be created")
+                Dim show As UInt8 = 0
+                If showPrintPanel Then show = 1
+                ShowPanel(operation, show)
+                Return RunPrint(operation) <> 0
+            Finally
+                If info <> Nil Then ReleaseObject(info)
+                DrainPool(pool)
+            End Try
+        #Else
+            Throw New UnsupportedOperationException("Printing is not implemented on this platform")
+        #End If
+    End Function
+
+    Public Function ShowPageSetupDialog(parentWindow As Optional Of Window = None) As Boolean
+        #If TargetMac Then
+            RequireMain()
+            If parentWindow.HasValue Then Throw New UnsupportedOperationException("Attached page setup sheets are not implemented; omit parentWindow for a modal dialog")
+            Dim pool As Ptr = NewPool(NativeClass("NSAutoreleasePool"))
+            Dim candidate As Ptr = CopyInfo(Me.mInfo)
+            Try
+                If SetupRunPanel(SetupPanel(NativeClass("NSPageLayout")), candidate) <> 1 Then Return False
+                ReleaseObject(Me.mInfo)
+                Me.mInfo = candidate
+                candidate = Nil
+                Return True
+            Finally
+                If candidate <> Nil Then ReleaseObject(candidate)
+                DrainPool(pool)
+            End Try
+        #Else
+            Throw New UnsupportedOperationException("Page setup is not implemented on this platform")
+        #End If
+    End Function
+
+    Public Function PageSetupDialog(parentWindow As Optional Of Window = None) As Boolean
+        Return Me.ShowPageSetupDialog(parentWindow)
+    End Function
+
+    Public Property Landscape As Boolean
+        Get
+            #If TargetMac Then
+                RequireMain()
+                Return Orientation(Me.mInfo) = 1
+            #Else
+                Throw New UnsupportedOperationException("PrinterSetup requires macOS")
+            #End If
+        End Get
+        Set
+            #If TargetMac Then
+                RequireMain()
+                Dim orientationValue As Integer = 0
+                If value Then orientationValue = 1
+                SetupSetOrientation(Me.mInfo, orientationValue)
+            #Else
+                Throw New UnsupportedOperationException("PrinterSetup requires macOS")
+            #End If
+        End Set
+    End Property
+
+    Public Property PageWidth As Integer
+        Get
+            #If TargetMac Then
+                RequireMain()
+                Return Math.Round(SetupPaperSize(Me.mInfo).Width)
+            #Else
+                Throw New UnsupportedOperationException("PrinterSetup requires macOS")
+            #End If
+        End Get
+    End Property
+
+    Public Property PageHeight As Integer
+        Get
+            #If TargetMac Then
+                RequireMain()
+                Return Math.Round(SetupPaperSize(Me.mInfo).Height)
+            #Else
+                Throw New UnsupportedOperationException("PrinterSetup requires macOS")
+            #End If
+        End Get
+    End Property
+
+    Public Property Width As Integer
+        Get
+            #If TargetMac Then
+                RequireMain()
+                Return Math.Round(SetupPaperSize(Me.mInfo).Width - SetupLeftMargin(Me.mInfo) - SetupRightMargin(Me.mInfo))
+            #Else
+                Throw New UnsupportedOperationException("PrinterSetup requires macOS")
+            #End If
+        End Get
+    End Property
+
+    Public Property Height As Integer
+        Get
+            #If TargetMac Then
+                RequireMain()
+                Return Math.Round(SetupPaperSize(Me.mInfo).Height - SetupTopMargin(Me.mInfo) - SetupBottomMargin(Me.mInfo))
+            #Else
+                Throw New UnsupportedOperationException("PrinterSetup requires macOS")
+            #End If
+        End Get
+    End Property
+
+    Public Property Left As Integer
+        Get
+            #If TargetMac Then
+                RequireMain()
+                Return 0
+            #Else
+                Throw New UnsupportedOperationException("PrinterSetup requires macOS")
+            #End If
+        End Get
+    End Property
+
+    Public Property Top As Integer
+        Get
+            #If TargetMac Then
+                RequireMain()
+                Return 0
+            #Else
+                Throw New UnsupportedOperationException("PrinterSetup requires macOS")
+            #End If
+        End Get
+    End Property
+
+    Public Property PageLeft As Integer
+        Get
+            #If TargetMac Then
+                RequireMain()
+                Return Math.Round(0.0 - SetupLeftMargin(Me.mInfo))
+            #Else
+                Throw New UnsupportedOperationException("PrinterSetup requires macOS")
+            #End If
+        End Get
+    End Property
+
+    Public Property PageTop As Integer
+        Get
+            #If TargetMac Then
+                RequireMain()
+                Return Math.Round(0.0 - SetupTopMargin(Me.mInfo))
+            #Else
+                Throw New UnsupportedOperationException("PrinterSetup requires macOS")
+            #End If
+        End Get
+    End Property
+
+    Public Property HorizontalResolution As Integer
+        Get
+            #If TargetMac Then
+                RequireMain()
+                Return 72
+            #Else
+                Throw New UnsupportedOperationException("PrinterSetup requires macOS")
+            #End If
+        End Get
+    End Property
+
+    Public Property VerticalResolution As Integer
+        Get
+            #If TargetMac Then
+                RequireMain()
+                Return 72
+            #Else
+                Throw New UnsupportedOperationException("PrinterSetup requires macOS")
+            #End If
+        End Get
+    End Property
+
+    ' Versioned Buoy settings, intentionally not an NSKeyedUnarchiver object stream.
+    Public Property Settings As String
+        Get
+            #If TargetMac Then
+                RequireMain()
+                Dim item As New JSONItem()
+                item.Value("format") = "buoy.printing.page-setup.v1"
+                item.Value("landscape") = Me.Landscape
+                Dim size As PrintSize = SetupPaperSize(Me.mInfo)
+                item.Value("width") = size.Width
+                item.Value("height") = size.Height
+                item.Value("left") = SetupLeftMargin(Me.mInfo)
+                item.Value("right") = SetupRightMargin(Me.mInfo)
+                item.Value("top") = SetupTopMargin(Me.mInfo)
+                item.Value("bottom") = SetupBottomMargin(Me.mInfo)
+                item.Value("scale") = SetupScaling(Me.mInfo)
+                Dim options As New JSONOptions()
+                options.DecimalPlaces = 3
+                Return item.ToString(options)
+            #Else
+                Throw New UnsupportedOperationException("PrinterSetup requires macOS")
+            #End If
+        End Get
+        Set
+            #If TargetMac Then
+                RequireMain()
+                Dim item As JSONItem = Json.Parse(value)
+                If item.Value("format").AsString().Or("") <> "buoy.printing.page-setup.v1" Then Throw New InvalidArgumentException("Unsupported printer settings format")
+                If Not item.Value("landscape").IsBoolean() Then Throw New InvalidArgumentException("Missing landscape setting")
+                ' Validate exactly the precision Settings can preserve, before native mutation.
+                Dim widthValue As Double = Math.Round(item.Value("width").AsNumber().Or(-1.0) * 1000.0) / 1000.0
+                Dim heightValue As Double = Math.Round(item.Value("height").AsNumber().Or(-1.0) * 1000.0) / 1000.0
+                Dim leftValue As Double = Math.Round(item.Value("left").AsNumber().Or(-1.0) * 1000.0) / 1000.0
+                Dim rightValue As Double = Math.Round(item.Value("right").AsNumber().Or(-1.0) * 1000.0) / 1000.0
+                Dim topValue As Double = Math.Round(item.Value("top").AsNumber().Or(-1.0) * 1000.0) / 1000.0
+                Dim bottomValue As Double = Math.Round(item.Value("bottom").AsNumber().Or(-1.0) * 1000.0) / 1000.0
+                Dim scaleValue As Double = Math.Round(item.Value("scale").AsNumber().Or(-1.0) * 1000.0) / 1000.0
+                If widthValue <= 0.0 Or widthValue > 100000.0 Or heightValue <= 0.0 Or heightValue > 100000.0 Then Throw New InvalidArgumentException("Invalid paper dimensions")
+                If leftValue < 0.0 Or rightValue < 0.0 Or topValue < 0.0 Or bottomValue < 0.0 Then Throw New InvalidArgumentException("Invalid page margins")
+                If leftValue + rightValue >= widthValue Or topValue + bottomValue >= heightValue Then Throw New InvalidArgumentException("Page margins leave no printable area")
+                If scaleValue <= 0.0 Or scaleValue > 100.0 Then Throw New InvalidArgumentException("Invalid page scale")
+                Dim candidate As Ptr = CopyInfo(Me.mInfo)
+                Try
+                    Dim orientationValue As Integer = 0
+                    If item.Value("landscape").AsBoolean().Or(False) Then orientationValue = 1
+                    SetupSetOrientation(candidate, orientationValue)
+                    Dim size As PrintSize = { Width: widthValue, Height: heightValue }
+                    SetupSetPaperSize(candidate, size)
+                    SetupSetLeftMargin(candidate, leftValue)
+                    SetupSetRightMargin(candidate, rightValue)
+                    SetupSetTopMargin(candidate, topValue)
+                    SetupSetBottomMargin(candidate, bottomValue)
+                    SetupSetScaling(candidate, scaleValue)
+                    ReleaseObject(Me.mInfo)
+                    Me.mInfo = candidate
+                    candidate = Nil
+                Finally
+                    If candidate <> Nil Then ReleaseObject(candidate)
+                End Try
+            #Else
+                Throw New UnsupportedOperationException("PrinterSetup requires macOS")
+            #End If
+        End Set
+    End Property
+
+End Class
+
+Public Class PrinterInfo
+    Public Property Name As String
+    Public Property IsDefault As Boolean
+End Class
+
+Public Function BufferedPrintingSupported() As Boolean
+#If TargetLinux Or TargetWindows Then
+    Return True
+#Else
+    Return False
+#End If
+End Function
+
+Private Sub ValidatePrintString(value As String, allowEmpty As Boolean)
+    If Not allowEmpty And value = "" Then
+        Throw New InvalidArgumentException("Printing input must be nonempty")
+    End If
+    Dim encoded As Bytes = Bytes.FromString(value, Text.Encodings.UTF8)
+    For i As Integer = 0 To encoded.Count - 1
+        If encoded.Item(i) = 0 Then
+            Throw New InvalidArgumentException("Printing input cannot contain NUL")
+        End If
+    Next
+End Sub
+
+''' Xojo-inspired setup. Page dimensions are a logical canvas in 72-point inches.
+Public Class PrintJobSetup
+    ''' Collated copies; inclusive one-based range. LastPage = 0 means through the end.
+    Public Property Copies As Integer = 1
+    Public Property FirstPage As Integer = 1
+    Public Property LastPage As Integer = 0
+    Public Property PrinterName As String = ""
+    Public Property JobName As String = "Buoy document"
+    Public Property Landscape As Boolean = False
+    Public Property PageWidth As Double = 595.275590551
+    Public Property PageHeight As Double = 841.88976378
+
+    Public Property HorizontalResolution As Integer
+        Get
+            Return 72
+        End Get
+    End Property
+
+    Public Property VerticalResolution As Integer
+        Get
+            Return 72
+        End Get
+    End Property
+
+    Public Shared Function OpenPrinter() As PrinterGraphics
+        Dim defaults As New PrintJobSetup
+        Return PrintJobSetup.OpenPrinter(defaults)
+    End Function
+
+    Public Shared Function OpenPrinter(setup As PrintJobSetup) As PrinterGraphics
+        If Not BufferedPrintingSupported() Then
+            Throw New UnsupportedOperationException("Native printing requires Linux or Windows")
+        End If
+        If setup = Nil Then
+            Dim defaults As New PrintJobSetup
+            Return New PrinterGraphics(defaults)
+        End If
+        Return New PrinterGraphics(setup)
+    End Function
+End Class
+
+''' Legacy REALbasic-style global spelling, alongside PrintJobSetup.OpenPrinter.
+Public Function OpenPrinter(setup As PrintJobSetup) As PrinterGraphics
+    Return PrintJobSetup.OpenPrinter(setup)
+End Function
+
+Public Function OpenPrinter() As PrinterGraphics
+    Return PrintJobSetup.OpenPrinter()
+End Function
+
+''' Buffered text drawing. Explicit Close submits; Cancel/destruction never submits.
+Public Class PrinterGraphics
+    Public Property FontName As String = "System"
+    Public Property FontSize As Double = 12.0
+    Private Property Document As BuoyPrintDocument
+    Private Property SelectedPrinter As String
+    Private Property SelectedTitle As String
+    Private Property SelectedCopies As Integer
+    Private Property SelectedFirstPage As Integer
+    Private Property SelectedLastPage As Integer
+
+    Public Property Copies As Integer
+        Get
+            Return SelectedCopies
+        End Get
+    End Property
+
+    Public Property FirstPage As Integer
+        Get
+            Return SelectedFirstPage
+        End Get
+    End Property
+
+    Public Property LastPage As Integer
+        Get
+            Return SelectedLastPage
+        End Get
+    End Property
+    Private Property Finished As Boolean = False
+    Private Property Cancelled As Boolean = False
+    Private Property AcceptedJob As Integer = 0
+    Private Property ItemCount As Integer = 0
+    Private Property ContentBytes As Integer = 0
+    Private Property StateValue As String = "open"
+    Private Property FailureValue As Exception
+
+    Public Property SubmissionState As String
+        Get
+            Return StateValue
+        End Get
+    End Property
+
+    Public Property SubmissionFailure As Exception
+        Get
+            Return FailureValue
+        End Get
+    End Property
+
+    Public Sub Constructor(setup As PrintJobSetup)
+        If Not BufferedPrintingSupported() Then
+            Throw New UnsupportedOperationException("Native printing requires Linux or Windows")
+        End If
+        If setup = Nil Then
+            Throw New InvalidArgumentException("PrintJobSetup must not be Nil")
+        End If
+        ValidatePrintString(setup.PrinterName, True)
+        ValidatePrintString(setup.JobName, False)
+        If Not (setup.PageWidth >= 1.0 And setup.PageWidth <= 14400.0 And setup.PageHeight >= 1.0 And setup.PageHeight <= 14400.0) Then
+            Throw New InvalidArgumentException("Page dimensions must be within 1..14400 points")
+        End If
+        If setup.Copies < 1 Or setup.Copies > 1000 Then
+            Throw New InvalidArgumentException("Copies must be within 1..1000")
+        End If
+        If setup.FirstPage < 1 Or setup.FirstPage > 1000 Or setup.LastPage < 0 Or setup.LastPage > 1000 Then
+            Throw New InvalidArgumentException("Page range must be within 1..1000; LastPage 0 means through the end")
+        End If
+        If setup.LastPage <> 0 And setup.LastPage < setup.FirstPage Then
+            Throw New InvalidArgumentException("LastPage precedes FirstPage")
+        End If
+        SelectedCopies = setup.Copies
+        SelectedFirstPage = setup.FirstPage
+        SelectedLastPage = setup.LastPage
+        SelectedPrinter = setup.PrinterName
+        If SelectedPrinter = "" Then
+            Dim selected As Optional Of String = DefaultPrinter()
+            If Not selected.HasValue Then
+                Throw New RuntimeException("No default printer; set PrinterName explicitly")
+            End If
+            SelectedPrinter = selected.Value
+        End If
+        SelectedTitle = setup.JobName
+        Document = New BuoyPrintDocument
+        Document.PageWidth = setup.PageWidth
+        Document.PageHeight = setup.PageHeight
+        If setup.Landscape And Document.PageHeight > Document.PageWidth Then
+            Document.PageWidth = setup.PageHeight
+            Document.PageHeight = setup.PageWidth
+        End If
+        Array.Append(Document.Pages, New BuoyPrintPage)
+    End Sub
+
+    Private Sub RequireOpen()
+        If Finished Then
+            Throw New InvalidArgumentException("Printer graphics is closed")
+        End If
+    End Sub
+
+    Public Property Width As Double
+        Get
+            Return Document.PageWidth
+        End Get
+    End Property
+
+    Public Property Height As Double
+        Get
+            Return Document.PageHeight
+        End Get
+    End Property
+
+    Public Property PageCount As Integer
+        Get
+            Return Array.Count(Document.Pages)
+        End Get
+    End Property
+
+    Public Property IsClosed As Boolean
+        Get
+            Return Finished
+        End Get
+    End Property
+
+    Public Property PrintingCancelled As Boolean
+        Get
+            Return Cancelled
+        End Get
+    End Property
+
+    Public Property JobId As Integer
+        Get
+            Return AcceptedJob
+        End Get
+    End Property
+
+    ''' Single-line text at x and baseline y, in points; no automatic wrapping.
+    Public Sub DrawText(str As String, x As Double, y As Double)
+        RequireOpen()
+        ValidatePrintString(str, True)
+        ValidatePrintString(FontName, False)
+        If String.Contains(str, "\n") Or String.Contains(str, "\r") Or String.Contains(str, "\t") Or String.Contains(str, String.Chr(8232)) Or String.Contains(str, String.Chr(8233)) Then
+            Throw New InvalidArgumentException("DrawText accepts one line without tabs; use multiple drawing calls")
+        End If
+        Dim fontBytes As Bytes = FontName.AsUTF16LE()
+        If fontBytes.Count > 62 Then
+            Throw New InvalidArgumentException("Font name exceeds 31 UTF-16 code units")
+        End If
+        If Not (x >= 0.0 And x <= Width And y >= 0.0 And y <= Height And FontSize >= 1.0 And FontSize <= 1000.0) Then
+            Throw New InvalidArgumentException("Invalid text position or font size")
+        End If
+        Dim encoded As Bytes = Bytes.FromString(str, Text.Encodings.UTF8)
+        If ItemCount >= 100000 Or ContentBytes + encoded.Count > 16777216 Then
+            Throw New InvalidArgumentException("Print document exceeds its text limit")
+        End If
+        Dim item As New BuoyPrintText
+        item.Content = str
+        item.X = x
+        item.Y = y
+        item.FontName = FontName
+        item.FontSize = FontSize
+        Dim page As BuoyPrintPage = Document.Pages(Array.Count(Document.Pages) - 1)
+        Array.Append(page.Items, item)
+        ItemCount += 1
+        ContentBytes += encoded.Count
+    End Sub
+
+    ' Build a bounded ordered view; shared immutable page records avoid copying text.
+    ' Both native renderers receive the same collated selection, with no driver copies.
+    Private Function OutputDocument() As BuoyPrintDocument
+        Dim last As Integer = SelectedLastPage
+        If last = 0 Then last = Array.Count(Document.Pages)
+        If SelectedFirstPage > Array.Count(Document.Pages) Or last > Array.Count(Document.Pages) Then
+            Throw New InvalidArgumentException("Requested page range exceeds buffered pages")
+        End If
+        If (last - SelectedFirstPage + 1) * SelectedCopies > 1000 Then
+            Throw New InvalidArgumentException("Selected copies exceed 1000 output pages")
+        End If
+        Dim output As New BuoyPrintDocument
+        output.PageWidth = Document.PageWidth
+        output.PageHeight = Document.PageHeight
+        For copy As Integer = 1 To SelectedCopies
+            For number As Integer = SelectedFirstPage To last
+                Array.Append(output.Pages, Document.Pages(number - 1))
+            Next
+        Next
+        Return output
+    End Function
+
+    Public Sub ExportPDF(fileName As String)
+        RequireOpen()
+#If TargetLinux Then
+        PrintBackend.ExportPDF(fileName, OutputDocument())
+#Else
+        Throw New UnsupportedOperationException("Buffered PDF export requires Linux")
+#End If
+    End Sub
+
+    Public Sub NextPage()
+        RequireOpen()
+        If Array.Count(Document.Pages) >= 1000 Then
+            Throw New InvalidArgumentException("Print document exceeds 1000 pages")
+        End If
+        Array.Append(Document.Pages, New BuoyPrintPage)
+    End Sub
+
+    Public Sub Cancel()
+        If Not Finished Then
+            Finished = True
+            Cancelled = True
+            StateValue = "cancelled"
+            If Document <> Nil Then
+                Document.Pages = []
+            End If
+        End If
+    End Sub
+
+    ''' Submit once. A failed submission is terminal to prevent accidental retries.
+    Public Function Close() As Integer
+        If Finished Then
+            Return AcceptedJob
+        End If
+        Finished = True
+#If TargetLinux Or TargetWindows Then
+        StateValue = "failed"
+        Try
+            AcceptedJob = PrintBackend.PrintPages(SelectedPrinter, SelectedTitle, OutputDocument())
+            StateValue = "accepted"
+            Return AcceptedJob
+        Catch failure As Exception
+            FailureValue = failure
+            Document.Pages = []
+            Throw failure
+        Finally
+            Document.Pages = []
+        End Try
+#Else
+        Throw New UnsupportedOperationException("Native printing requires Linux or Windows")
+#End If
+    End Function
+
+End Class
+
+Public Function PrintingAvailable() As Boolean
+#If TargetLinux Or TargetWindows Then
+    Return PrintBackend.IsAvailable()
+#Else
+    Return False
+#End If
+End Function
+
+Public Function Printers() As Array Of PrinterInfo
+#If TargetLinux Or TargetWindows Then
+    Dim records As Array Of PrinterInfo = []
+    For Each native In PrintBackend.Printers()
+        Dim entry As New PrinterInfo
+        entry.Name = native.Name
+        entry.IsDefault = native.IsDefault
+        Array.Append(records, entry)
+    Next
+    Return records
+#Else
+    Throw New UnsupportedOperationException("Native printing requires Linux or Windows")
+#End If
+End Function
+
+Public Function DefaultPrinter() As Optional Of String
+#If TargetLinux Or TargetWindows Then
+    Return PrintBackend.DefaultPrinter()
+#Else
+    Throw New UnsupportedOperationException("Native printing requires Linux or Windows")
+#End If
+End Function
+
+''' Submit UTF-8 text to an explicitly selected printer; returns the spool job ID.
+Public Function PrintText(printerName As String, title As String, text As String) As Integer
+#If TargetLinux Or TargetWindows Then
+    Return PrintBackend.PrintText(printerName, title, text)
+#Else
+    Throw New UnsupportedOperationException("Native printing requires Linux or Windows")
+#End If
+End Function
+
+''' Explicit adapter: copies paper geometry/orientation, not native driver settings.
+Public Function OpenPrinter(setup As PrinterSetup) As PrinterGraphics
+    If setup = Nil Then Throw New InvalidArgumentException("PrinterSetup must not be Nil")
+    Return OpenPrinter(setup.ToPrintJobSetup())
+End Function
+
+''' Implementation capabilities and library-only availability; never contacts a spooler.
+Public Function PrintingCapabilities() As PrintCapabilities
+    Return New PrintCapabilities
+End Function
+
+Public Class PrintCapabilities
+    Public Property CopiesSupported As Boolean
+        Get
+            Return BufferedPrintingSupported()
+        End Get
+    End Property
+
+    Public Property PageRangesSupported As Boolean
+        Get
+            Return BufferedPrintingSupported()
+        End Get
+    End Property
+
+    Public Property DiscoverySupported As Boolean
+        Get
+            Return BufferedPrintingSupported()
+        End Get
+    End Property
+
+    Public Property TextSubmissionSupported As Boolean
+        Get
+            Return BufferedPrintingSupported()
+        End Get
+    End Property
+
+    Public Property BufferedPagesSupported As Boolean
+        Get
+            Return BufferedPrintingSupported()
+        End Get
+    End Property
+
+    Public Property ControlPDFExportSupported As Boolean
+        Get
+            Return PrintingSupported()
+        End Get
+    End Property
+
+    Public Property NativeControlPrintSupported As Boolean
+        Get
+            Return PrintingSupported()
+        End Get
+    End Property
+
+    Public Property PageSetupDialogSupported As Boolean
+        Get
+            Return PrintingSupported()
+        End Get
+    End Property
+
+    Public Property DiscoveryAvailable As Boolean
+        Get
+            Return PrintingAvailable()
+        End Get
+    End Property
+
+    Public Property TextSubmissionAvailable As Boolean
+        Get
+            Return PrintingAvailable()
+        End Get
+    End Property
+
+    Public Property PDFExportSupported As Boolean
+        Get
+#If TargetLinux Then
+            Return True
+#Else
+            Return False
+#End If
+        End Get
+    End Property
+
+    Public Property PDFExportAvailable As Boolean
+        Get
+#If TargetLinux Then
+            Return System.IsLibraryAvailable("libcairo.so.2") And System.IsLibraryAvailable("libpangocairo-1.0.so.0") And System.IsLibraryAvailable("libpango-1.0.so.0") And System.IsLibraryAvailable("libgobject-2.0.so.0")
+#Else
+            Return False
+#End If
+        End Get
+    End Property
+
+    Public Property BufferedPagesAvailable As Boolean
+        Get
+#If TargetLinux Then
+            Return PrintingAvailable() And Me.PDFExportAvailable
+#Else
+            Return PrintingAvailable()
+#End If
+        End Get
+    End Property
+End Class
