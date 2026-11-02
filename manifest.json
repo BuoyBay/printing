@@ -2,7 +2,7 @@
     "schema": 1,
     "name": "printing",
     "version": "0.1.0",
-    "description": "Native control printing and in-memory PDFs",
+    "description": "Print controls to PDF",
     "platforms": [
         "arm64-apple-macos",
         "x86_64-apple-macos",
