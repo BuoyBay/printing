@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "printing",
   "version": "0.1.0",
-  "description": "Native printing and in-memory PDF export for Buoy controls",
+  "description": "Print native controls and export in-memory PDFs",
   "platforms": [
     "arm64-apple-macos",
     "x86_64-apple-macos",
