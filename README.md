@@ -1,4 +1,4 @@
-# Print native controls and export in-memory PDFs
+# Native control printing and in-memory PDFs
 
 `Import printing`. The package contains its own Linux CUPS/Pango/Cairo and Windows GDI/WinSpool implementations. macOS native control printing and page setup require the main thread. `PrintingSupported()` retains its original native-control meaning (macOS only); use `PrintingCapabilities()` for individual buffered-job features.
 
@@ -17,7 +17,7 @@ consumer project for reproducible installs.
 
 ## Example
 
-```buoy
+```basic
 Import printing
 
 Sub Main()
