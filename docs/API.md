@@ -41,11 +41,7 @@ Buffered jobs retain limits of 1000 pages, 100000 text runs, 16 MiB UTF-8, dimen
 
 The legacy source facade in `containers/integrations/printing` remains usable independently, including writable Double `PrinterSetup.PageWidth/PageHeight`. Do not mix it with the canonical package in one application: aliased imports still produce duplicate classes. No safe mixed-import adapter is claimed and no read-only geometry substitution has been made. Migrate the whole consumer to `PrintJobSetup` and the package together.
 
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-
 Implemented against [Apple NSPrintInfo](https://developer.apple.com/documentation/appkit/nsprintinfo), [NSPageLayout](https://developer.apple.com/documentation/appkit/nspagelayout), and [NSPrintOperation](https://developer.apple.com/documentation/appkit/nsprintoperation).
-
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
 
 Linux-host macOS cross-link validation may be blocked by toolchain Security/libc++ stubs, CoreFoundation framework layout/search paths, and missing CFData symbols. Semantic checks alone do not establish native linking or execution. The runner retains link failures and returns nonzero for an incomplete matrix. macOS native compatibility, ARM64 execution, visual inspection and physical output require separate validation.
 
@@ -58,8 +54,6 @@ Draw every source page normally. `Close` selects the requested range and emits c
 `CopiesSupported` and `PageRangesSupported` are true on Linux/Windows and false on macOS, matching the implemented buffered API. The shared selection stage feeds the existing CUPS/Pango and GDI renderers, without editing either backend copy or concurrent text-shaping work. The legacy container facade does not gain these setup options.
 
 Paper selection remains unexposed: the Linux backend sends PDF page dimensions but no `media` option, and Windows `CreateDCW` receives no DEVMODE (dimensions only control logical clipping). Neither establishes that a queue supports a requested paper size, tray, or form. `PageWidth`/`PageHeight` remain logical canvas dimensions, not a media-selection promise. There is no placeholder paper capability.
-
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
 
 When another agent is updating backend copies concurrently, `--record-backend-drift` allows the package runner to finish its compiler/runtime checks while recording mismatched source hashes and returning an incomplete result. The default remains strict. Receipts identify the exact source snapshot tested; reconcile container/package differences before declaring integration complete.
 

@@ -11,7 +11,8 @@ related: ["index.md", "api.md", "typed-api.md"]
 
 ## Install and import
 
-Copy the sealed `printing-0.1.0.buipkg` archive into your application's `packages/` folder. To build it from this repository, run `python3 tools/build_integrations.py printing`.
+Copy the sealed `printing-0.1.0.buipkg` archive into your application's `packages/` folder. Build the package using the native package builder described in
+[CONTRIBUTING](https://github.com/BuoyBay/printing/blob/main/CONTRIBUTING.md).
 
 ## First use
 
